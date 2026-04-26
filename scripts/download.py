@@ -9,7 +9,7 @@ from datetime import datetime
 # ---------------------------------------------------------------------------
 # Logging setup
 # ---------------------------------------------------------------------------
-log_dir = os.path.join(os.path.dirname(__file__), 'logs')
+log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
 os.makedirs(log_dir, exist_ok=True)
 
 log_file = os.path.join(log_dir, f"download_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
@@ -51,7 +51,7 @@ def parse_args():
     parser.add_argument(
         '--out-dir',
         default=None,
-        help='Directory to save PDFs (default: docs/<csv_stem>/)'
+        help='Directory to save PDFs (default: pdfs/<csv_stem>/)'
     )
     parser.add_argument(
         '--batch-size',
@@ -165,7 +165,7 @@ def main():
         out_dir = args.out_dir
     else:
         csv_stem = os.path.splitext(os.path.basename(args.csv))[0]
-        out_dir = os.path.join(os.path.dirname(__file__), 'docs', csv_stem)
+        out_dir = os.path.join(os.path.dirname(__file__), '..', 'pdfs', csv_stem)
 
     os.makedirs(out_dir, exist_ok=True)
     log.info(f"PDFs will be saved to: {out_dir}")

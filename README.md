@@ -123,6 +123,8 @@ ntsb-insight/
 
 ## Setup
 
+> **Important:** All commands below must be run from the repo root (`ntsb-insight/`), not from inside `pipeline/` or `scripts/`.
+
 ```bash
 git clone https://github.com/mjgit007/NTSB-Insight-RAG.git
 cd NTSB-Insight-RAG
@@ -137,6 +139,9 @@ pip install -r requirements.txt
 # Add your API keys
 cp .env.example .env
 # Edit .env and fill in GOOGLE_API_KEY (and optionally ANTHROPIC_API_KEY)
+
+# Create the chunks folder (gitignored, so not in the repo)
+mkdir -p chunks
 ```
 
 ---
@@ -226,7 +231,17 @@ Test result: **52 chunks embedded and stored in 1.3 seconds**.
 
 ---
 
-### 5. Query
+### 5. Validate ChromaDB (optional)
+
+```bash
+python pipeline/validate_chromadb.py
+```
+
+Runs sanity checks on the stored embeddings — confirms chunk count, checks metadata fields are populated, and samples a few chunks to verify dimensions and content. Useful after a full embed run to catch any silent failures.
+
+---
+
+### 6. Query
 
 ```bash
 # Basic query

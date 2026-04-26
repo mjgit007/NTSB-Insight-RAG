@@ -241,7 +241,7 @@ def main():
     # Stats
     stats = {'processed': 0, 'no_meta': 0, 'no_text': 0, 'no_sections': 0, 'total_chunks': 0}
 
-    out_path = os.path.join(os.path.dirname(__file__), args.out)
+    out_path = args.out if os.path.isabs(args.out) else os.path.join(os.getcwd(), args.out)
     with open(out_path, 'w') as out_file:
         for i, pdf_name in enumerate(pdf_files, start=1):
             ntsb_no  = pdf_name.replace('.pdf', '')

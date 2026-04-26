@@ -129,7 +129,7 @@ def main():
     log.info(f"Collection: '{args.collection}' | Existing chunks: {col.count()}")
 
     # Load chunks from JSONL
-    jsonl_path = os.path.join(os.path.dirname(__file__), args.jsonl)
+    jsonl_path = args.jsonl if os.path.isabs(args.jsonl) else os.path.join(os.getcwd(), args.jsonl)
     with open(jsonl_path) as f:
         all_chunks = [json.loads(line) for line in f]
     log.info(f"Loaded {len(all_chunks)} chunks from {jsonl_path}")
