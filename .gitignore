@@ -1,0 +1,30 @@
+# Environment
+.env
+.venv/
+
+# Vector database (large, local only)
+vectordb/
+
+# Downloaded PDFs (too large for git)
+pdfs/
+
+# Generated chunk files
+chunks/
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,6 @@
+pandas
+requests
+pdfplumber
+chromadb
+google-genai
+python-dotenv
