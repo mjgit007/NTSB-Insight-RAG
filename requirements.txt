@@ -4,3 +4,14 @@ pdfplumber
 chromadb
 google-genai
 python-dotenv
+
+# Hybrid search
+rank-bm25
+
+# Reranker
+cohere
+
+# Evaluation
+ragas
+openai
+instructor
