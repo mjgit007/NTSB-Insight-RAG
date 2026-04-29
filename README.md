@@ -34,6 +34,52 @@ No model training. No cloud vector database. Everything runs locally.
 
 ---
 
+## Pipeline Architecture
+
+```
+User query (plain English)
+        │
+        ▼
+┌─────────────────────┐
+│   Query Expansion   │  Gemini Flash rewrites query into NTSB formal terminology
+└─────────────────────┘
+        │
+        ▼
+┌─────────────────────┐
+│   Embed Query       │  gemini-embedding-001 (RETRIEVAL_QUERY, 3072-dim)
+└─────────────────────┘
+        │
+        ├──────────────────────────────┐
+        ▼                              ▼
+┌──────────────┐              ┌──────────────────┐
+│  BM25 Search │              │  Vector Search   │
+│ (keyword)    │              │  (cosine, ChromaDB)│
+└──────────────┘              └──────────────────┘
+        │                              │
+        └──────────┬───────────────────┘
+                   ▼
+        ┌─────────────────────┐
+        │  RRF Fusion (k=60)  │  Merges BM25 + vector rankings
+        └─────────────────────┘
+                   │
+                   ▼
+        ┌─────────────────────┐
+        │  Cohere Reranker    │  rerank-v3.5 cross-encoder, top 20 → top 5
+        └─────────────────────┘
+                   │
+                   ▼
+        ┌─────────────────────┐
+        │   Score Cutoff      │  Below 0.10 → "no relevant results"
+        └─────────────────────┘
+                   │
+                   ▼
+        ┌─────────────────────┐
+        │   Gemini Answer     │  gemini-2.5-flash generates grounded answer
+        └─────────────────────┘
+```
+
+---
+
 ## How the Data Was Extracted
 
 ### Step 1 — CSV export from NTSB
@@ -98,15 +144,17 @@ ntsb-insight/
 ├── pipeline/                    # Core RAG pipeline
 │   ├── ingest.py                # PDF → section chunks → JSONL
 │   ├── embed_and_store.py       # JSONL → Gemini embeddings → ChromaDB
-│   ├── query.py                 # Question → ChromaDB → AI answer
+│   ├── query.py                 # Question → hybrid search → rerank → AI answer
+│   ├── evaluate.py              # RAGAS evaluation framework (15-question golden dataset)
 │   ├── setup_chromadb.py        # Create / inspect / reset vector DB
 │   └── validate_chromadb.py     # Sanity checks on stored embeddings
 │
 ├── chunks/                      # JSONL output from ingest.py — gitignored
 ├── vectordb/                    # ChromaDB persistence — gitignored
 ├── logs/                        # Download and run logs — gitignored
+├── results/                     # RAGAS evaluation output JSON — gitignored
 │
-├── .env.example                 # API key template
+├── .env.example                 # API key template — copy to .env and fill in
 ├── requirements.txt
 └── .gitignore
 ```
@@ -116,8 +164,8 @@ ntsb-insight/
 ## Prerequisites
 
 - Python 3.11+
-- A [Google AI Studio](https://aistudio.google.com) API key (free) — for embeddings
-- An [Anthropic](https://console.anthropic.com) API key — for answer generation (optional, Gemini Flash is used by default)
+- A [Google AI Studio](https://aistudio.google.com) API key (free) — for embeddings and answer generation
+- A [Cohere](https://dashboard.cohere.com) API key (free tier available) — for reranking
 
 ---
 
@@ -138,10 +186,27 @@ pip install -r requirements.txt
 
 # Add your API keys
 cp .env.example .env
-# Edit .env and fill in GOOGLE_API_KEY (and optionally ANTHROPIC_API_KEY)
+```
 
+### `.env` file — required keys
+
+Open `.env` and fill in both keys:
+
+```
+GOOGLE_API_KEY=your_google_ai_studio_key_here
+COHERE_API_KEY=your_cohere_api_key_here
+```
+
+| Key | Where to get it | Used for |
+|---|---|---|
+| `GOOGLE_API_KEY` | [Google AI Studio](https://aistudio.google.com) → Get API key | Embeddings + answer generation + query expansion |
+| `COHERE_API_KEY` | [Cohere Dashboard](https://dashboard.cohere.com) → API keys | Reranking (optional — pipeline runs without it, reranker disabled) |
+
+> Without `COHERE_API_KEY` the pipeline still works — it falls back to RRF-ranked results without the reranker pass.
+
+```bash
 # Create the chunks folder (gitignored, so not in the repo)
-mkdir -p chunks
+mkdir -p chunks results
 ```
 
 ---
@@ -181,26 +246,6 @@ Each PDF is split into named sections (History of Flight, Analysis, Probable Cau
 
 **Output:** `chunks/chunks_2020_2024.jsonl` — one JSON line per chunk
 
-```json
-{
-  "id": "ERA21FA001_chunk_3",
-  "ntsb_no": "ERA21FA001",
-  "text": "The pilot failed to maintain adequate airspeed...",
-  "metadata": {
-    "ntsb_no": "ERA21FA001",
-    "section": "Analysis",
-    "state": "Florida",
-    "make": "CESSNA",
-    "model": "172S",
-    "injury_severity": "Fatal",
-    "fatal_count": 2,
-    "weather": "VMC",
-    "event_date": "2021-03-15",
-    ...
-  }
-}
-```
-
 Test result: **5 PDFs → 52 chunks**, avg ~10 chunks per report.
 
 ---
@@ -225,8 +270,6 @@ python pipeline/embed_and_store.py --jsonl chunks/chunks_2020_2024.jsonl
 
 Reads the JSONL, calls Gemini (`gemini-embedding-001`, 3072 dimensions) to embed each chunk, and upserts into ChromaDB. Supports resume — chunks already in ChromaDB are skipped.
 
-Embeds use `task_type=RETRIEVAL_DOCUMENT` — this tells Gemini to optimise the vector for being *found* by a query, not for neutral similarity. At query time the opposite task type (`RETRIEVAL_QUERY`) is used, which bridges the vocabulary gap between plain-English questions and formal NTSB report language.
-
 Test result: **52 chunks embedded and stored in 1.3 seconds**.
 
 ---
@@ -237,7 +280,7 @@ Test result: **52 chunks embedded and stored in 1.3 seconds**.
 python pipeline/validate_chromadb.py
 ```
 
-Runs sanity checks on the stored embeddings — confirms chunk count, checks metadata fields are populated, and samples a few chunks to verify dimensions and content. Useful after a full embed run to catch any silent failures.
+Runs sanity checks — confirms chunk count, checks metadata fields, and samples a few chunks to verify dimensions and content.
 
 ---
 
@@ -256,57 +299,39 @@ python pipeline/query.py \
 
 # Interactive mode
 python pipeline/query.py --interactive
+
+# Disable individual pipeline stages (for comparison / debugging)
+python pipeline/query.py --query "ERA22LA175" --no-hybrid    # cosine-only, no BM25
+python pipeline/query.py --query "ERA22LA175" --no-rerank    # skip Cohere reranker
+python pipeline/query.py --query "pilot error crash" --no-expand  # skip query expansion
 ```
 
 **Available filters:** `--state`, `--make`, `--weather` (VMC/IMC), `--injury` (Fatal/Serious/Minor/None), `--section`, `--ntsb-no`
 
 ---
 
-## Query Results
+### 7. Evaluate Pipeline Quality (optional)
 
-### Positive result — specific, grounded answer
+```bash
+# Quick smoke test — 1 question
+python pipeline/evaluate.py --subset 1
 
-```
-Question: What caused the fatal Cessna accident in Florida?
+# Full evaluation — all 15 questions, save results
+python pipeline/evaluate.py --out results/eval_full_pipeline.json
 
-RETRIEVED CHUNKS
-  [1] ERA21FA001_chunk_4
-       Section : Probable Cause and Findings
-       Report  : ERA21FA001 | CESSNA | Florida | Fatal
-       Score   : 0.821
-
-  [2] ERA21FA001_chunk_3
-       Section : Analysis
-       Report  : ERA21FA001 | CESSNA | Florida | Fatal
-       Score   : 0.794
-
-ANSWER
-Based on NTSB report ERA21FA001, the probable cause of this fatal accident was
-the pilot's failure to maintain adequate airspeed during the approach, which
-resulted in an aerodynamic stall at an altitude too low to recover. Contributing
-factors included the pilot's inadequate preflight planning and failure to account
-for the tailwind component during landing.
+# Baseline comparison — no improvements enabled
+python pipeline/evaluate.py --no-hybrid --no-rerank --no-expand \
+  --out results/eval_baseline.json
 ```
 
-### Negative result — honest about missing context
+Runs the 15-question golden dataset through the pipeline and scores with RAGAS:
 
-```
-Question: What caused the helicopter crash in Hawaii in 2023?
-
-RETRIEVED CHUNKS
-  [1] ANC23LA041_chunk_2
-       Section : History of Flight
-       Report  : ANC23LA041 | ROBINSON | Alaska | Minor
-       Score   : 0.431
-
-ANSWER
-The retrieved context does not contain information about a helicopter accident
-in Hawaii in 2023. The closest match is an Alaska Robinson accident (ANC23LA041)
-which does not match your query. Try broadening your filters or check that the
-relevant PDFs have been downloaded and ingested.
-```
-
-Low similarity scores (< 0.5) and a mismatch between the filter and the retrieved metadata are reliable signals that the answer is outside the current dataset.
+| Metric | What it measures |
+|---|---|
+| **Faithfulness** | Does the answer stay grounded in retrieved chunks? (no hallucination) |
+| **Answer Relevancy** | Does the answer address the question asked? |
+| **Context Precision** | Are retrieved chunks relevant to the question? |
+| **Context Recall** | Do retrieved chunks contain the ground truth information? |
 
 ---
 
@@ -319,5 +344,67 @@ Low similarity scores (< 0.5) and a mismatch between the filter and the retrieve
 | Chunk size | 4,000 chars / 400 overlap | ~1,000 tokens, safe for embedding limits |
 | Vector DB | ChromaDB (local) | No cloud, persistent, zero cost |
 | Embed model | `gemini-embedding-001` (3072 dims) | Free tier, high-dimensional |
-| Retrieval | Metadata pre-filter + vector similarity | Precision without noise |
-| Answer model | Gemini Flash | Free tier; swap for Claude via `ANTHROPIC_API_KEY` |
+| Retrieval | BM25 + vector via RRF | Hybrid catches both exact terms and semantic matches |
+| Reranker | Cohere `rerank-v3.5` | Cross-encoder reads query+chunk together for precise relevance |
+| Query expansion | Gemini Flash → NTSB terminology | Bridges plain English to formal report language |
+| Score cutoff | Rerank score < 0.10 | Blocks LLM call when no relevant context found |
+| Answer model | Gemini 2.5 Flash | Free tier; fast; grounded answers |
+| Evaluation | RAGAS + 15-question golden dataset | Quantitative quality measurement across 4 metrics |
+
+---
+
+## Query Results
+
+### Positive result — specific, grounded answer
+
+```
+Question: what caused the engine failure in Alaska?
+
+RETRIEVED CHUNKS  [Hybrid: BM25 + Vector via RRF]
+  [1] ANC25LA013_chunk_2  |  Probable Cause and Findings  |  CESSNA | Hawaii
+  [2] ANC25LA013_chunk_1  |  Analysis                     |  CESSNA | Hawaii
+  [3] ANC25LA013_chunk_4  |  History of Flight             |  CESSNA | Hawaii
+  [4] ANC25LA012_chunk_2  |  Probable Cause and Findings  |  PIPER  | Alaska
+  [5] ANC25LA013_chunk_7  |  Aircraft and Owner Info       |  CESSNA | Hawaii
+
+ANSWER
+Based on the provided NTSB accident report excerpts:
+The NTSB report ANC25LA012 (Alaska) states the probable cause was the pilot's
+improper airspeed management which resulted in a bounced landing and insufficient
+airspeed to perform a go-around procedure. This report does not indicate an engine
+failure. The report ANC25LA013 describes an engine failure, but occurred in Hawaii.
+The provided context does not contain enough information about an engine failure
+specifically in Alaska.
+```
+
+> Notice: the model is **honest** — it doesn't hallucinate. It clearly states what it found and what's missing.
+
+### Negative result — honest about missing context
+
+```
+Question: What caused the helicopter crash in Hawaii in 2023?
+
+ANSWER
+The retrieved context does not contain information about a helicopter accident
+in Hawaii in 2023. Try broadening your filters or check that the relevant PDFs
+have been downloaded and ingested.
+```
+
+Low similarity scores and metadata mismatches are reliable signals that the answer is outside the current dataset.
+
+---
+
+## Technology Stack
+
+| Layer | Tool |
+|---|---|
+| PDF parsing | `pdfplumber` |
+| Vector database | `ChromaDB` (local, persistent) |
+| Embeddings | `gemini-embedding-001` — `RETRIEVAL_DOCUMENT` at ingest, `RETRIEVAL_QUERY` at query time |
+| BM25 keyword index | `rank-bm25` (BM25Okapi, built in-memory at startup) |
+| Hybrid fusion | Reciprocal Rank Fusion (RRF, k=60) |
+| Reranker | Cohere `rerank-v3.5` cross-encoder |
+| Query expansion | `gemini-2.5-flash` with NTSB-aware prompt |
+| Answer generation | `gemini-2.5-flash` |
+| Evaluation | `ragas` 0.4.x — per-sample `ascore()` API |
+| Eval LLM client | `openai.AsyncOpenAI` + `instructor` (JSON mode) → Gemini backend |
